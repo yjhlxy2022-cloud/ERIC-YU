@@ -1,0 +1,80 @@
+name: Build experimental Folia iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/folia-ios.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - name: Fetch public Folia source
+        uses: actions/checkout@v4
+        with:
+          repository: chthollyphile/folia-sonnet
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Record source and Xcode versions
+        working-directory: source
+        run: |
+          git rev-parse HEAD
+          xcodebuild -version
+      - name: Install dependencies and matching iOS runtime
+        working-directory: source
+        run: |
+          npm ci
+          VERSION=$(node -p "require('./node_modules/@capacitor/core/package.json').version")
+          npm install --save-exact "@capacitor/ios@$VERSION"
+      - name: Build Folia web assets
+        working-directory: source
+        run: npm run build:capacitor
+      - name: Generate iOS container
+        working-directory: source
+        run: |
+          npx cap add ios
+          npx cap sync ios
+      - name: Compile for real iPhones without signing
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d ios/App/App.xcworkspace ]; then
+            PROJECT=(-workspace ios/App/App.xcworkspace)
+          else
+            PROJECT=(-project ios/App/App.xcodeproj)
+          fi
+          xcodebuild "${PROJECT[@]}" -scheme App -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/folia-build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/folia-build/Build/Products/Release-iphoneos/App.app"
+          test -f "$APP/Info.plist"
+          mkdir -p "$RUNNER_TEMP/folia-package/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/folia-package/Payload/"
+          cd "$RUNNER_TEMP/folia-package"
+          /usr/bin/zip -qry Folia-experimental-unsigned.ipa Payload
+          shasum -a 256 Folia-experimental-unsigned.ipa > SHA256.txt
+          git -C "$GITHUB_WORKSPACE/source" rev-parse HEAD > SOURCE_COMMIT.txt
+      - name: Upload IPA and source reference
+        uses: actions/upload-artifact@v4
+        with:
+          name: Folia-experimental-unsigned
+          path: |
+            ${{ runner.temp }}/folia-package/*.ipa
+            ${{ runner.temp }}/folia-package/*.txt
+          retention-days: 7
